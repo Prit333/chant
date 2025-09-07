@@ -93,20 +93,6 @@
         #closeMessageBoxBtn {
             margin-top: 1rem;
         }
-        #loadingSpinner {
-            border: 4px solid rgba(0, 0, 0, 0.1);
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            border-left-color: #4f46e5;
-            animation: spin 1s ease infinite;
-            margin: 1rem auto;
-            display: none;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
     </style>
 </head>
 <body>
@@ -137,9 +123,13 @@
                          hover:file:bg-violet-100" type="file" id="unplugSoundInput" accept="audio/*">
         </div>
         <div class="input-group">
-            <label class="text-gray-600 font-medium" for="mantraTextInput">Text for Timed Audio</label>
-            <input class="input-text" type="text" id="mantraTextInput" placeholder="e.g. 'Hare Krishna'" value="Hare Krishna">
-            <button id="generateMantraBtn" class="button button-primary mt-2">Generate & Play Sound</button>
+            <label class="text-gray-600 font-medium" for="timerSoundInput">Timed Sound</label>
+            <input class="input-text block w-full text-sm text-gray-500
+                         file:mr-4 file:py-2 file:px-4
+                         file:rounded-full file:border-0
+                         file:text-sm file:font-semibold
+                         file:bg-violet-50 file:text-violet-700
+                         hover:file:bg-violet-100" type="file" id="timerSoundInput" accept="audio/*">
         </div>
     </div>
 
@@ -156,7 +146,6 @@
             <button id="startIntervalBtn" class="button button-primary w-full">Start Timer</button>
             <button id="stopIntervalBtn" class="button button-secondary w-full">Stop Timer</button>
         </div>
-        <div id="loadingSpinner"></div>
     </div>
 </div>
 
@@ -174,24 +163,19 @@
         const statusMessage = document.getElementById('status-message');
         const chargingSoundInput = document.getElementById('chargingSoundInput');
         const unplugSoundInput = document.getElementById('unplugSoundInput');
+        const timerSoundInput = document.getElementById('timerSoundInput');
         const intervalInput = document.getElementById('intervalInput');
         const startIntervalBtn = document.getElementById('startIntervalBtn');
         const stopIntervalBtn = document.getElementById('stopIntervalBtn');
-        const mantraTextInput = document.getElementById('mantraTextInput');
-        const generateMantraBtn = document.getElementById('generateMantraBtn');
         const messageBox = document.getElementById('messageBox');
         const messageBoxText = document.getElementById('messageBoxText');
         const closeMessageBoxBtn = document.getElementById('closeMessageBoxBtn');
-        const loadingSpinner = document.getElementById('loadingSpinner');
 
         let audioContext = null;
         let chargingBuffer = null;
         let unplugBuffer = null;
-        let mantraBuffer = null;
+        let timerBuffer = null;
         let intervalId = null;
-
-        const apiKey = "";
-        const ttsApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
 
         // Helper function to show a custom message box instead of `alert()`
         const showMessageBox = (message) => {
@@ -216,6 +200,8 @@
                 source.buffer = buffer;
                 source.connect(audioContext.destination);
                 source.start();
+            } else {
+                showMessageBox("No sound file loaded to play.");
             }
         };
 
@@ -229,6 +215,8 @@
                     chargingBuffer = audioBuffer;
                 } else if (soundType === 'unplug') {
                     unplugBuffer = audioBuffer;
+                } else if (soundType === 'timer') {
+                    timerBuffer = audioBuffer;
                 }
                 updateStatus(`New sound loaded for ${soundType}.`);
             } catch (error) {
@@ -237,150 +225,9 @@
             }
         };
 
-        // Function to convert PCM audio data to WAV format
-        const pcmToWav = (pcmData, sampleRate) => {
-            const numChannels = 1;
-            const bytesPerSample = 2; // Signed 16-bit
-            const blockAlign = numChannels * bytesPerSample;
-            const byteRate = sampleRate * numChannels * bytesPerSample;
-            const dataSize = pcmData.length * bytesPerSample;
-            const buffer = new ArrayBuffer(44 + dataSize);
-            const view = new DataView(buffer);
-
-            let offset = 0;
-            const writeString = (str) => {
-                for (let i = 0; i < str.length; i++) {
-                    view.setUint8(offset++, str.charCodeAt(i));
-                }
-            };
-            const writeUint32 = (val) => {
-                view.setUint32(offset, val, true);
-                offset += 4;
-            };
-            const writeUint16 = (val) => {
-                view.setUint16(offset, val, true);
-                offset += 2;
-            };
-
-            // RIFF chunk
-            writeString('RIFF');
-            writeUint32(36 + dataSize);
-            writeString('WAVE');
-
-            // fmt chunk
-            writeString('fmt ');
-            writeUint32(16); // subchunk1 size
-            writeUint16(1);  // PCM format
-            writeUint16(numChannels);
-            writeUint32(sampleRate);
-            writeUint32(byteRate);
-            writeUint16(blockAlign);
-            writeUint16(16); // bits per sample
-
-            // data chunk
-            writeString('data');
-            writeUint32(dataSize);
-
-            // PCM audio data
-            const pcm16 = new Int16Array(pcmData);
-            for (let i = 0; i < pcm16.length; i++) {
-                view.setInt16(offset, pcm16[i], true);
-                offset += 2;
-            }
-
-            return new Blob([view], { type: 'audio/wav' });
-        };
-
-        const base64ToArrayBuffer = (base64) => {
-            const binaryString = window.atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            return bytes.buffer;
-        };
-
-        // Fetch and generate mantra audio using TTS API with retries
-        const fetchMantraAudio = async (text, retries = 3, delay = 1000) => {
-            if (!text) return;
-            initAudioContext();
-            loadingSpinner.style.display = 'block';
-            try {
-                const payload = {
-                    contents: [{ parts: [{ text }] }],
-                    generationConfig: {
-                        responseModalities: ["AUDIO"],
-                        speechConfig: {
-                            voiceConfig: {
-                                prebuiltVoiceConfig: { voiceName: "Kore" }
-                            }
-                        }
-                    },
-                    model: "gemini-2.5-flash-preview-tts"
-                };
-
-                let response = await fetch(ttsApiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                
-                let retryCount = 0;
-                while (!response.ok && retryCount < retries) {
-                    retryCount++;
-                    console.log(`API call failed, retrying in ${delay}ms... (Attempt ${retryCount}/${retries})`);
-                    await new Promise(res => setTimeout(res, delay));
-                    delay *= 2; // Exponential backoff
-                    response = await fetch(ttsApiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                }
-                
-                if (!response.ok) {
-                    throw new Error(`API error after ${retries} attempts: ${response.statusText}`);
-                }
-
-                const result = await response.json();
-                const part = result?.candidates?.[0]?.content?.parts?.[0];
-                const audioData = part?.inlineData?.data;
-                const mimeType = part?.inlineData?.mimeType;
-
-                if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
-                    const sampleRateMatch = mimeType.match(/rate=(\d+)/);
-                    const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
-                    
-                    const pcmArrayBuffer = base64ToArrayBuffer(audioData);
-                    const pcmData = new Int16Array(pcmArrayBuffer);
-
-                    const audioBuffer = audioContext.createBuffer(1, pcmData.length, sampleRate);
-                    const nowBuffering = audioBuffer.getChannelData(0);
-                    for (let i = 0; i < pcmData.length; i++) {
-                        nowBuffering[i] = pcmData[i] / 32768; // Convert 16-bit to float
-                    }
-                    mantraBuffer = audioBuffer;
-                    playAudio(mantraBuffer);
-                    updateStatus("New timed audio generated and ready to play.");
-                } else {
-                    throw new Error("Invalid audio data received from API.");
-                }
-            } catch (error) {
-                console.error("Error generating mantra audio:", error);
-                showMessageBox("Could not generate audio. Please check your internet connection.");
-            } finally {
-                loadingSpinner.style.display = 'none';
-            }
-        };
-
         // Interval handler
         const handleInterval = () => {
-            if (mantraBuffer) {
-                playAudio(mantraBuffer);
-            } else {
-                fetchMantraAudio(mantraTextInput.value);
-            }
+            playAudio(timerBuffer);
         };
 
         // Event listeners for file inputs
@@ -396,13 +243,19 @@
             }
         };
 
-        generateMantraBtn.onclick = () => {
-            fetchMantraAudio(mantraTextInput.value);
+        timerSoundInput.onchange = (event) => {
+            if (event.target.files.length > 0) {
+                loadSound(event.target.files[0], 'timer');
+            }
         };
 
         // Interval timer controls
         startIntervalBtn.onclick = () => {
             if (intervalId) clearInterval(intervalId);
+            if (!timerBuffer) {
+                showMessageBox("Please load a sound file for the timer first.");
+                return;
+            }
             const minutes = parseInt(intervalInput.value, 10);
             if (minutes > 0) {
                 updateStatus(`Timer started. Audio will play every ${minutes} minutes.`);
@@ -452,7 +305,6 @@
         const initialSetup = async () => {
             initAudioContext();
             updateStatus('App loaded. Checking battery status...');
-            await fetchMantraAudio(mantraTextInput.value); // Load default mantra audio
             getBatteryAndListen();
         };
 
